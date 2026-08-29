@@ -21,6 +21,10 @@ on:
         required: false
         default: "Manual deploy to dev"
 
+defaults:
+  run:
+    shell: bash
+
 # Only allow one concurrent deployment to dev at a time
 concurrency:
   group: cd-frontend-dev
@@ -32,8 +36,6 @@ jobs:
     runs-on: ubuntu-latest
     environment: dev          # GitHub Environment for approvals/secrets
 
-    # Only run this workflow if triggered from the dev branch
-    if: github.ref == 'refs/heads/dev'
 
     steps:
       - name: Checkout source
