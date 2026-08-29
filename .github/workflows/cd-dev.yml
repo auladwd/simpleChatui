@@ -1,0 +1,102 @@
+# ============================================================
+# CD Pipeline – Frontend DEV (MANUAL TRIGGER)
+#
+# Trigger  : workflow_dispatch (manual human decision)
+# Branch   : dev
+# Actions  : build Dockerfile.dev → tag → push → update gitops
+#
+# Required GitHub Secrets:
+#   DOCKERHUB_USERNAME  – Docker Hub login
+#   DOCKERHUB_TOKEN     – Docker Hub access token
+#   GITOPS_TOKEN        – GitHub PAT with write access to gitops repo
+# ============================================================
+
+name: CD – Frontend DEV (Manual)
+
+on:
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: "Reason for deployment (recorded in commit)"
+        required: false
+        default: "Manual deploy to dev"
+
+# Only allow one concurrent deployment to dev at a time
+concurrency:
+  group: cd-frontend-dev
+  cancel-in-progress: false
+
+jobs:
+  deploy-dev:
+    name: Build & Deploy to DEV
+    runs-on: ubuntu-latest
+    environment: dev          # GitHub Environment for approvals/secrets
+
+    # Only run this workflow if triggered from the dev branch
+    if: github.ref == 'refs/heads/dev'
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      # ── Image identity ──────────────────────────────────────
+      - name: Compute image tag
+        id: tag
+        run: |
+          SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+          TS=$(date -u +"%Y%m%dT%H%M%SZ")
+          TAG="dev-${SHA}-${TS}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "image=${{ secrets.DOCKERHUB_USERNAME }}/support-chat-frontend:${TAG}" >> "$GITHUB_OUTPUT"
+
+      # ── Docker build & push ─────────────────────────────────
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push DEV image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: Dockerfile.dev
+          push: true
+          tags: |
+            ${{ steps.tag.outputs.image }}
+          build-args: |
+            VITE_API_URL=http://backend-service.dev.svc.cluster.local:5000
+            VITE_SOCKET_URL=http://backend-service.dev.svc.cluster.local:5000
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # ── Update GitOps repository ────────────────────────────
+      - name: Checkout GitOps repo
+        uses: actions/checkout@v4
+        with:
+          repository: mdarifahammedreza/support-chat-gitops
+          token: ${{ secrets.GITOPS_TOKEN }}
+          path: gitops
+
+      - name: Update frontend image tag in dev manifests
+        run: |
+          cd gitops
+          # Patch the image field in the dev deployment manifest
+          sed -i "s|image: auladdevops/support-chat-frontend:.*|image: ${{ steps.tag.outputs.image }}|g" \
+            k8s/dev/frontend-deployment.yaml
+
+      - name: Commit and push GitOps change
+        run: |
+          cd gitops
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add k8s/dev/frontend-deployment.yaml
+          git commit -m "chore(dev): bump frontend to ${{ steps.tag.outputs.tag }}
+
+          Triggered by: ${{ github.actor }}
+          Reason: ${{ github.event.inputs.reason }}
+          Source commit: ${{ github.sha }}"
+          git push

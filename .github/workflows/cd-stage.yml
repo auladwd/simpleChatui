@@ -1,0 +1,96 @@
+# ============================================================
+# CD Pipeline – Frontend STAGE (MANUAL TRIGGER)
+#
+# Trigger  : workflow_dispatch (manual human decision)
+# Branch   : stage
+# Actions  : build Dockerfile.prod (stage mode) → tag → push → update gitops
+#
+# Required GitHub Secrets:
+#   DOCKERHUB_USERNAME  – Docker Hub login
+#   DOCKERHUB_TOKEN     – Docker Hub access token
+#   GITOPS_TOKEN        – GitHub PAT with write access to gitops repo
+# ============================================================
+
+name: CD – Frontend STAGE (Manual)
+
+on:
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: "Reason for deployment (recorded in commit)"
+        required: false
+        default: "Manual deploy to stage"
+
+concurrency:
+  group: cd-frontend-stage
+  cancel-in-progress: false
+
+jobs:
+  deploy-stage:
+    name: Build & Deploy to STAGE
+    runs-on: ubuntu-latest
+    environment: stage
+
+    if: github.ref == 'refs/heads/stage'
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Compute image tag
+        id: tag
+        run: |
+          SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+          TS=$(date -u +"%Y%m%dT%H%M%SZ")
+          TAG="stage-${SHA}-${TS}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "image=${{ secrets.DOCKERHUB_USERNAME }}/support-chat-frontend:${TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push STAGE image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: Dockerfile.prod
+          push: true
+          tags: |
+            ${{ steps.tag.outputs.image }}
+          build-args: |
+            VITE_API_URL=http://backend-service.stage.svc.cluster.local:5000
+            VITE_SOCKET_URL=http://backend-service.stage.svc.cluster.local:5000
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Checkout GitOps repo
+        uses: actions/checkout@v4
+        with:
+          repository: mdarifahammedreza/support-chat-gitops
+          token: ${{ secrets.GITOPS_TOKEN }}
+          path: gitops
+
+      - name: Update frontend image tag in stage manifests
+        run: |
+          cd gitops
+          sed -i "s|image: auladdevops/support-chat-frontend:.*|image: ${{ steps.tag.outputs.image }}|g" \
+            k8s/stage/frontend-deployment.yaml
+
+      - name: Commit and push GitOps change
+        run: |
+          cd gitops
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add k8s/stage/frontend-deployment.yaml
+          git commit -m "chore(stage): bump frontend to ${{ steps.tag.outputs.tag }}
+
+          Triggered by: ${{ github.actor }}
+          Reason: ${{ github.event.inputs.reason }}
+          Source commit: ${{ github.sha }}"
+          git push

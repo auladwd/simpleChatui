@@ -1,0 +1,25 @@
+# ============================================================
+# Dockerfile.dev  –  simple-vite-front  (Development)
+#
+# Purpose : local / dev-environment container with HMR support
+# Base    : node:20-alpine
+# Port    : 5173 (Vite dev server)
+# ============================================================
+
+FROM node:20-alpine AS dev
+
+WORKDIR /app
+
+# Install dependencies first (layer cache)
+COPY package.json yarn.lock* package-lock.json* ./
+RUN if [ -f yarn.lock ]; then yarn install --frozen-lockfile; \
+    else npm ci; fi
+
+# Copy source (overridden by volume mount in docker-compose)
+COPY . .
+
+# Expose Vite dev port
+EXPOSE 5173
+
+# Use Vite dev server with --host so it binds to 0.0.0.0
+CMD ["npx", "vite", "--host", "0.0.0.0", "--port", "5173"]
